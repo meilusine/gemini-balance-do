@@ -28,6 +28,8 @@ const handleOPTIONS = async () => {
 const BASE_URL = 'https://generativelanguage.googleapis.com';
 const API_VERSION = 'v1beta';
 const API_CLIENT = 'genai-js/0.21.0';
+const MAX_API_KEY_ATTEMPTS = 3;
+const RETRYABLE_UPSTREAM_STATUSES = new Set([429, 500, 502, 503, 504]);
 
 const SAFETY_CATEGORIES = [
 	'HARM_CATEGORY_HATE_SPEECH',
@@ -141,11 +143,10 @@ export class LoadBalancer extends DurableObject {
 
 		try {
 			const headers = new Headers();
-			const apiKey = await this.getRandomApiKey();
-			if (!apiKey) {
+			const apiKeys = await this.getRandomApiKeys(MAX_API_KEY_ATTEMPTS);
+			if (apiKeys.length === 0) {
 				return new Response('No API keys configured in the load balancer.', { status: 500 });
 			}
-			headers.set('x-goog-api-key', apiKey);
 
 			// Forward content-type header
 			if (request.headers.has('content-type')) {
@@ -166,11 +167,7 @@ export class LoadBalancer extends DurableObject {
 				}
 			}
 
-			const response = await fetch(targetUrl, {
-				method: request.method,
-				headers: headers,
-				body: requestBody,
-			});
+			const response = await this.fetchWithApiKeyRetry(targetUrl, request.method, headers, requestBody, apiKeys, Boolean(directModel));
 
 			console.log('Call Gemini Success');
 
@@ -273,7 +270,7 @@ export class LoadBalancer extends DurableObject {
 		return new Response(responseBody, fixCors(response));
 	}
 
-	async handleCompletions(req: any, apiKey: string) {
+	async handleCompletions(req: any, apiKeys: string[]) {
 		const DEFAULT_MODEL = 'gemini-2.5-flash';
 		let model = DEFAULT_MODEL;
 
@@ -320,11 +317,14 @@ export class LoadBalancer extends DurableObject {
 			url += '?alt=sse';
 		}
 
-		const response = await fetch(url, {
-			method: 'POST',
-			headers: makeHeaders(apiKey, { 'Content-Type': 'application/json' }),
-			body: JSON.stringify(body),
-		});
+		const response = await this.fetchWithApiKeyRetry(
+			url,
+			'POST',
+			new Headers({ 'Content-Type': 'application/json', 'x-goog-api-client': API_CLIENT }),
+			JSON.stringify(body),
+			apiKeys,
+			true
+		);
 
 		let responseBody: BodyInit | null = response.body;
 		if (response.ok) {
@@ -787,19 +787,58 @@ export class LoadBalancer extends DurableObject {
 	// Helper Methods
 	// =================================================================================================
 
-	private async getRandomApiKey(): Promise<string | null> {
+	private async getRandomApiKeys(limit: number): Promise<string[]> {
 		try {
-			const results = await this.ctx.storage.sql.exec('SELECT * FROM api_keys ORDER BY RANDOM() LIMIT 1').raw<any>();
-			const keys = Array.from(results);
-			if (keys) {
-				const key = keys[0] as any;
-				console.log(`Gemini Selected API Key: ${key}`);
-				return key;
-			}
-			return null;
+			const results = await this.ctx.storage.sql.exec('SELECT api_key FROM api_keys ORDER BY RANDOM() LIMIT ?', limit).raw<any>();
+			return Array.from(results)
+				.map((row: any) => (Array.isArray(row) ? row[0] : row))
+				.filter((key): key is string => typeof key === 'string' && key.length > 0);
 		} catch (error) {
 			console.error('获取随机API密钥失败:', error);
-			return null;
+			return [];
+		}
+	}
+
+	private async fetchWithApiKeyRetry(
+		url: string,
+		method: string,
+		baseHeaders: Headers,
+		body: BodyInit | null,
+		apiKeys: string[],
+		retryEmptyCandidate = false
+	): Promise<Response> {
+		let lastError: unknown;
+		for (let index = 0; index < apiKeys.length; index++) {
+			const headers = new Headers(baseHeaders);
+			headers.set('x-goog-api-key', apiKeys[index]);
+			try {
+				const response = await fetch(url, { method, headers, body });
+				const emptyCandidate = retryEmptyCandidate && (await this.hasNoUsableCandidate(response));
+				const shouldRetry =
+					(RETRYABLE_UPSTREAM_STATUSES.has(response.status) || emptyCandidate) && index < apiKeys.length - 1;
+				if (!shouldRetry) return response;
+				await response.body?.cancel();
+			} catch (error) {
+				lastError = error;
+				if (index === apiKeys.length - 1) throw error;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 250 * (index + 1)));
+		}
+		throw lastError instanceof Error ? lastError : new Error('All Gemini API key attempts failed.');
+	}
+
+	private async hasNoUsableCandidate(response: Response): Promise<boolean> {
+		if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return false;
+		try {
+			const data: any = await response.clone().json();
+			if (!Array.isArray(data?.candidates) || data.candidates.length === 0) return true;
+			return !data.candidates.some((candidate: any) =>
+				(candidate.content?.parts ?? []).some(
+					(part: any) => (!part.thought && typeof part.text === 'string' && part.text.length > 0) || part.functionCall || part.inlineData
+				)
+			);
+		} catch {
+			return false;
 		}
 	}
 
@@ -817,21 +856,21 @@ export class LoadBalancer extends DurableObject {
 			return new Response(err.message, fixCors({ statusText: err.message ?? 'Internal Server Error', status: 500 }));
 		};
 
-		const apiKey = await this.getRandomApiKey();
-		if (!apiKey) {
+		const apiKeys = await this.getRandomApiKeys(MAX_API_KEY_ATTEMPTS);
+		if (apiKeys.length === 0) {
 			return new Response('No API keys configured in the load balancer.', { status: 500 });
 		}
 
 		switch (true) {
 			case pathname.endsWith('/chat/completions'):
 				assert(request.method === 'POST');
-				return this.handleCompletions(await request.json(), apiKey).catch(errHandler);
+				return this.handleCompletions(await request.json(), apiKeys).catch(errHandler);
 			case pathname.endsWith('/embeddings'):
 				assert(request.method === 'POST');
-				return this.handleEmbeddings(await request.json(), apiKey).catch(errHandler);
+				return this.handleEmbeddings(await request.json(), apiKeys[0]).catch(errHandler);
 			case pathname.endsWith('/models'):
 				assert(request.method === 'GET');
-				return this.handleModels(apiKey).catch(errHandler);
+				return this.handleModels(apiKeys[0]).catch(errHandler);
 			default:
 				throw new HttpError('404 Not Found', 404);
 		}

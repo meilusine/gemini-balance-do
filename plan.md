@@ -5,7 +5,7 @@
 - Project name: gemini-balance-do
 - Current phase: Compatibility fix
 - Current task: Gemini 3.6+ trailing model turn compatibility
-- Status: [x] safety and authentication update deployed and verified
+- Status: [-] key failover verified locally; deployment pending
 - Last updated: 2026-09-04
 
 ## 1. Final Goal
@@ -26,10 +26,10 @@ Out of scope:
 
 ## 2. Current Status
 
-- Phase: complete
-- Current task: live verification completed
+- Phase: reliability improvement
+- Current task: deploy bounded multi-key failover
 - Blocked: no
-- Next task: user verifies a normal SillyTavern reply with the existing `AUTH_KEY`
+- Next task: deploy and verify retry behavior
 - Known issue: live upstream verification requires the user's deployed secrets and is performed after Cloudflare deployment.
 
 ## 3. Architecture
@@ -75,6 +75,7 @@ SillyTavern request
 - [x] Protect API routes with `AUTH_KEY`.
 - [x] Protect the management page and `/api/*` routes with `HOME_ACCESS_KEY`.
 - [x] Deploy and verify authentication on the live domain.
+- [x] Retry up to three distinct keys for transient upstream errors and empty non-streaming candidates.
 
 ## 8. Task Backlog
 
@@ -98,6 +99,7 @@ Latest verification:
 - Live verification: an unauthenticated Gemini 3.8 native request ending in `model` returned HTTP 200, proving the repair is active. Final SillyTavern UI verification remains for the user.
 - 2026-09-04 security update: `npx tsc --noEmit`, Wrangler dry-run, and five authentication helper checks passed.
 - Live authentication: the root URL returned the management login page and an unauthenticated `/v1beta/models` request returned HTTP 401.
+- 2026-09-04 key failover: TypeScript and Wrangler dry-run checks passed.
 
 ## 10. Security and Defensive Design
 
@@ -111,6 +113,7 @@ Latest verification:
 | --- | --- | --- |
 | Continuation nudge slightly changes prompt semantics | Model may not reproduce an exact assistant prefill | Preserve the original model turn and ask for a natural continuation without repetition |
 | Parsing request bodies adds Worker CPU usage | Small increase per affected request | Parse only Gemini 3.6+ JSON generation requests |
+| Retrying may consume additional quota | One user request may make up to three upstream calls | Retry only transient statuses or genuinely empty candidates and cap attempts at three |
 
 ## 12. Open Questions
 
@@ -141,3 +144,11 @@ Latest verification:
 - Reason: minimize adjustable filtering while preventing public use of the stored Gemini keys.
 - Impact: clients must send `AUTH_KEY`; the management page now requires a password and uses a secure, HTTP-only, same-site cookie.
 - Status: deployed and live verified.
+
+### 2026-09-04 (key failover)
+
+- Type: reliability change
+- Description: sample up to three distinct keys and retry 429/500/502/503/504 responses; for non-streaming generation, also retry HTTP 200 responses with no usable candidate content.
+- Reason: avoid failing immediately when one key is limited or Gemini returns an empty candidate.
+- Impact: transient failures may create up to three upstream calls; normal successful requests still create one.
+- Status: locally verified; deployment pending.
