@@ -5,7 +5,7 @@
 - Project name: gemini-balance-do
 - Current phase: Compatibility fix
 - Current task: Gemini 3.6+ trailing model turn compatibility
-- Status: [-] implementation verified; live deployment pending
+- Status: [x] deployed and live verified
 - Last updated: 2026-09-04
 
 ## 1. Final Goal
@@ -26,10 +26,10 @@ Out of scope:
 
 ## 2. Current Status
 
-- Phase: deployment
-- Current task: push the verified compatibility helper
+- Phase: verification complete
+- Current task: Gemini 3.6+ compatibility completed
 - Blocked: no
-- Next task: verify the automatically deployed Worker from SillyTavern
+- Next task: add authentication support after user approval
 - Known issue: live upstream verification requires the user's deployed secrets and is performed after Cloudflare deployment.
 
 ## 3. Architecture
@@ -70,14 +70,14 @@ SillyTavern request
 - [x] Add native Gemini compatibility handling
 - [x] Add OpenAI-compatible handling
 - [x] Run typecheck and dry-run build
-- [ ] Deploy through the connected Cloudflare Git integration
+- [x] Deploy through the connected Cloudflare Git integration
 
 ## 8. Task Backlog
 
 - [x] Repair trailing `model` turns only for Gemini 3.6+.
 - [x] Verify normal `user`-ending requests remain unchanged by conditional inspection.
 - [x] Verify non-generation routes remain unchanged by scoped route matching.
-- [ ] Record deployment and live SillyTavern test result.
+- [x] Record deployment and live native Gemini test result.
 
 ## 9. Verification and Harness
 
@@ -91,7 +91,7 @@ Latest verification:
 - Date: 2026-09-04
 - Commands: `npx tsc --noEmit`; `npx wrangler deploy --dry-run`
 - Result: both exited successfully; Worker bundle completed at 126.15 KiB (30.79 KiB gzip).
-- Live verification: pending Cloudflare deployment and SillyTavern request.
+- Live verification: an unauthenticated Gemini 3.8 native request ending in `model` returned HTTP 200, proving the repair is active. Final SillyTavern UI verification remains for the user.
 
 ## 10. Security and Defensive Design
 
@@ -109,6 +109,7 @@ Latest verification:
 ## 12. Open Questions
 
 - [ ] Confirm the live SillyTavern preset succeeds after Cloudflare redeploys the commit.
+- [ ] Add API and management authentication: this older fork currently ignores the configured `AUTH_KEY` and `HOME_ACCESS_KEY` secrets.
 
 ## 13. Changelog
 
@@ -118,4 +119,11 @@ Latest verification:
 - Description: Gemini 3.6+ rejects requests whose final content role is `model`.
 - Reason: newer Gemini request validation no longer accepts assistant-prefill-shaped input.
 - Resolution: add a narrow compatibility repair in both proxy paths.
-- Status: locally verified; deployment pending
+- Status: deployed and live verified
+
+### 2026-09-04 (deployment verification)
+
+- Type: verification / security finding
+- Description: the deployed Gemini 3.8 endpoint repaired a trailing `model` turn and returned HTTP 200.
+- Impact: compatibility fix is active; the same no-credential test revealed that this fork does not enforce configured authentication secrets.
+- Status: compatibility complete; authentication follow-up pending user approval.
