@@ -35,6 +35,38 @@ const makeHeaders = (apiKey: string, more?: Record<string, string>) => ({
 	...more,
 });
 
+const CONTINUE_AFTER_MODEL_PROMPT = 'Continue the previous response naturally. Do not repeat existing content.';
+
+const requiresTrailingUserTurn = (model: string) => {
+	const match = model.match(/^gemini-(\d+)\.(\d+)/);
+	if (!match) return false;
+
+	const major = Number(match[1]);
+	const minor = Number(match[2]);
+	return major > 3 || (major === 3 && minor >= 6);
+};
+
+const ensureTrailingUserTurn = (body: any, model: string) => {
+	if (
+		!requiresTrailingUserTurn(model) ||
+		!Array.isArray(body?.contents) ||
+		body.contents[body.contents.length - 1]?.role !== 'model'
+	) {
+		return body;
+	}
+
+	body.contents.push({
+		role: 'user',
+		parts: [{ text: CONTINUE_AFTER_MODEL_PROMPT }],
+	});
+	return body;
+};
+
+const getGeminiModelFromPath = (pathname: string) => {
+	const match = pathname.match(/\/models\/([^/:]+):(?:generateContent|streamGenerateContent)$/);
+	return match?.[1];
+};
+
 /** A Durable Object's behavior is defined in an exported Javascript class */
 export class LoadBalancer extends DurableObject {
 	/**
@@ -102,10 +134,22 @@ export class LoadBalancer extends DurableObject {
 
 			console.log(`Request Sending to Gemini: ${targetUrl}`);
 
+			let requestBody: BodyInit | null = request.body;
+			const directModel = getGeminiModelFromPath(pathname);
+			if (request.method === 'POST' && directModel && requiresTrailingUserTurn(directModel)) {
+				const rawBody = await request.text();
+				requestBody = rawBody;
+				try {
+					requestBody = JSON.stringify(ensureTrailingUserTurn(JSON.parse(rawBody), directModel));
+				} catch {
+					// Keep the original body so Gemini can return its normal JSON validation error.
+				}
+			}
+
 			const response = await fetch(targetUrl, {
 				method: request.method,
 				headers: headers,
-				body: request.body,
+				body: requestBody,
 			});
 
 			console.log('Call Gemini Success');
@@ -226,6 +270,7 @@ export class LoadBalancer extends DurableObject {
 		}
 
 		let body = await this.transformRequest(req);
+		body = ensureTrailingUserTurn(body, model);
 		const extra = req.extra_body?.google;
 
 		if (extra) {
