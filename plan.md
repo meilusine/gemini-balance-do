@@ -5,7 +5,7 @@
 - Project name: gemini-balance-do
 - Current phase: Compatibility fix
 - Current task: Gemini 3.6+ trailing model turn compatibility
-- Status: [-] key failover verified locally; deployment pending
+- Status: [-] adaptive cooldown implementation in verification
 - Last updated: 2026-09-04
 
 ## 1. Final Goal
@@ -27,9 +27,9 @@ Out of scope:
 ## 2. Current Status
 
 - Phase: reliability improvement
-- Current task: deploy bounded multi-key failover
+- Current task: add lightweight per-key adaptive cooldown
 - Blocked: no
-- Next task: deploy and verify retry behavior
+- Next task: deploy and verify cooldown-aware key selection
 - Known issue: live upstream verification requires the user's deployed secrets and is performed after Cloudflare deployment.
 
 ## 3. Architecture
@@ -76,6 +76,7 @@ SillyTavern request
 - [x] Protect the management page and `/api/*` routes with `HOME_ACCESS_KEY`.
 - [x] Deploy and verify authentication on the live domain.
 - [x] Retry up to three distinct keys for transient upstream errors and empty non-streaming candidates.
+- [-] Store and honor per-key cooldown state without a background task.
 
 ## 8. Task Backlog
 
@@ -114,6 +115,7 @@ Latest verification:
 | Continuation nudge slightly changes prompt semantics | Model may not reproduce an exact assistant prefill | Preserve the original model turn and ask for a natural continuation without repetition |
 | Parsing request bodies adds Worker CPU usage | Small increase per affected request | Parse only Gemini 3.6+ JSON generation requests |
 | Retrying may consume additional quota | One user request may make up to three upstream calls | Retry only transient statuses or genuinely empty candidates and cap attempts at three |
+| A daily quota error can omit its exact reset time | A key may return too early or remain paused longer than necessary | Prefer `Retry-After`/`RetryInfo`; use a conservative 24-hour fallback only when the response explicitly indicates a daily quota |
 
 ## 12. Open Questions
 
@@ -152,3 +154,11 @@ Latest verification:
 - Reason: avoid failing immediately when one key is limited or Gemini returns an empty candidate.
 - Impact: transient failures may create up to three upstream calls; normal successful requests still create one.
 - Status: locally verified; deployment pending.
+
+### 2026-09-04 (adaptive cooldown)
+
+- Type: reliability change
+- Description: add a small cooldown table keyed by API key; select only keys whose cooldown has expired.
+- Rules: explicit retry delay is honored; minute quota uses 90 seconds; daily quota and 401/403 use 24 hours; unknown 429 uses 5 minutes; 503 is retried without cooling the key.
+- Security: cooldown logs never include API key values.
+- Status: implementation in verification.

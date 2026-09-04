@@ -30,6 +30,9 @@ const API_VERSION = 'v1beta';
 const API_CLIENT = 'genai-js/0.21.0';
 const MAX_API_KEY_ATTEMPTS = 3;
 const RETRYABLE_UPSTREAM_STATUSES = new Set([429, 500, 502, 503, 504]);
+const MINUTE_COOLDOWN_MS = 90 * 1000;
+const UNKNOWN_429_COOLDOWN_MS = 5 * 60 * 1000;
+const INVALID_KEY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 const SAFETY_CATEGORIES = [
 	'HARM_CATEGORY_HATE_SPEECH',
@@ -99,6 +102,14 @@ export class LoadBalancer extends DurableObject {
 		super(ctx, env);
 		// Initialize the database schema upon first creation.
 		this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS api_keys (api_key TEXT PRIMARY KEY)');
+		this.ctx.storage.sql.exec(`
+			CREATE TABLE IF NOT EXISTS api_key_cooldowns (
+				api_key TEXT PRIMARY KEY,
+				cooldown_until INTEGER NOT NULL DEFAULT 0,
+				failed_count INTEGER NOT NULL DEFAULT 0,
+				last_error_status INTEGER
+			)
+		`);
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -145,7 +156,7 @@ export class LoadBalancer extends DurableObject {
 			const headers = new Headers();
 			const apiKeys = await this.getRandomApiKeys(MAX_API_KEY_ATTEMPTS);
 			if (apiKeys.length === 0) {
-				return new Response('No API keys configured in the load balancer.', { status: 500 });
+				return this.noAvailableKeysResponse();
 			}
 
 			// Forward content-type header
@@ -716,6 +727,7 @@ export class LoadBalancer extends DurableObject {
 
 			const placeholders = keys.map(() => '?').join(',');
 			await this.ctx.storage.sql.exec(`DELETE FROM api_keys WHERE api_key IN (${placeholders})`, ...keys);
+			await this.ctx.storage.sql.exec(`DELETE FROM api_key_cooldowns WHERE api_key IN (${placeholders})`, ...keys);
 
 			return new Response(JSON.stringify({ message: 'API密钥删除成功。' }), {
 				status: 200,
@@ -748,10 +760,10 @@ export class LoadBalancer extends DurableObject {
 
 			const invalidKeys = checkResults.filter((result) => !result.valid).map((result) => result.key);
 			if (invalidKeys.length > 0) {
-				console.log('InvalidKeys: ', JSON.stringify(invalidKeys));
 				const placeholders = invalidKeys.map(() => '?').join(', ');
 				const statement = `DELETE FROM api_keys WHERE api_key IN (${placeholders})`;
 				this.ctx.storage.sql.exec(statement, ...invalidKeys);
+				this.ctx.storage.sql.exec(`DELETE FROM api_key_cooldowns WHERE api_key IN (${placeholders})`, ...invalidKeys);
 				console.log(`移除了 ${invalidKeys.length} 个无效的API密钥。`);
 			}
 
@@ -789,7 +801,18 @@ export class LoadBalancer extends DurableObject {
 
 	private async getRandomApiKeys(limit: number): Promise<string[]> {
 		try {
-			const results = await this.ctx.storage.sql.exec('SELECT api_key FROM api_keys ORDER BY RANDOM() LIMIT ?', limit).raw<any>();
+			const results = await this.ctx.storage.sql
+				.exec(
+					`SELECT k.api_key
+					 FROM api_keys k
+					 LEFT JOIN api_key_cooldowns c ON c.api_key = k.api_key
+					 WHERE COALESCE(c.cooldown_until, 0) <= ?
+					 ORDER BY RANDOM()
+					 LIMIT ?`,
+					Date.now(),
+					limit
+				)
+				.raw<any>();
 			return Array.from(results)
 				.map((row: any) => (Array.isArray(row) ? row[0] : row))
 				.filter((key): key is string => typeof key === 'string' && key.length > 0);
@@ -797,6 +820,29 @@ export class LoadBalancer extends DurableObject {
 			console.error('获取随机API密钥失败:', error);
 			return [];
 		}
+	}
+
+	private async noAvailableKeysResponse(): Promise<Response> {
+		const rows = Array.from(
+			await this.ctx.storage.sql
+				.exec(
+					`SELECT COUNT(k.api_key), MIN(c.cooldown_until)
+					 FROM api_keys k
+					 LEFT JOIN api_key_cooldowns c ON c.api_key = k.api_key
+					 WHERE c.cooldown_until > ?`,
+					Date.now()
+				)
+				.raw<any>()
+		);
+		const [count = 0, earliestCooldown = 0] = (rows[0] as any[]) ?? [];
+		if (Number(count) === 0) {
+			return new Response('No API keys configured in the load balancer.', { status: 500 });
+		}
+		const retryAfter = Math.max(1, Math.ceil((Number(earliestCooldown) - Date.now()) / 1000));
+		return new Response(JSON.stringify({ error: 'All API keys are cooling down.', retry_after: retryAfter }), {
+			status: 429,
+			headers: { 'Content-Type': 'application/json', 'Retry-After': String(retryAfter) },
+		});
 	}
 
 	private async fetchWithApiKeyRetry(
@@ -814,6 +860,7 @@ export class LoadBalancer extends DurableObject {
 			try {
 				const response = await fetch(url, { method, headers, body });
 				const emptyCandidate = retryEmptyCandidate && (await this.hasNoUsableCandidate(response));
+				await this.updateKeyCooldown(apiKeys[index], response);
 				const shouldRetry =
 					(RETRYABLE_UPSTREAM_STATUSES.has(response.status) || emptyCandidate) && index < apiKeys.length - 1;
 				if (!shouldRetry) return response;
@@ -825,6 +872,55 @@ export class LoadBalancer extends DurableObject {
 			await new Promise((resolve) => setTimeout(resolve, 250 * (index + 1)));
 		}
 		throw lastError instanceof Error ? lastError : new Error('All Gemini API key attempts failed.');
+	}
+
+	private async updateKeyCooldown(apiKey: string, response: Response): Promise<void> {
+		if (response.ok) {
+			await this.ctx.storage.sql.exec('DELETE FROM api_key_cooldowns WHERE api_key = ?', apiKey);
+			return;
+		}
+
+		let cooldownMs = 0;
+		if (response.status === 429) {
+			cooldownMs = await this.get429CooldownMs(response);
+		} else if (response.status === 401 || response.status === 403) {
+			cooldownMs = INVALID_KEY_COOLDOWN_MS;
+		}
+		if (cooldownMs === 0) return;
+
+		await this.ctx.storage.sql.exec(
+			`INSERT INTO api_key_cooldowns (api_key, cooldown_until, failed_count, last_error_status)
+			 VALUES (?, ?, 1, ?)
+			 ON CONFLICT(api_key) DO UPDATE SET
+				cooldown_until = excluded.cooldown_until,
+				failed_count = api_key_cooldowns.failed_count + 1,
+				last_error_status = excluded.last_error_status`,
+			apiKey,
+			Date.now() + cooldownMs,
+			response.status
+		);
+	}
+
+	private async get429CooldownMs(response: Response): Promise<number> {
+		const retryAfter = response.headers.get('retry-after');
+		if (retryAfter) {
+			const seconds = Number(retryAfter);
+			if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+			const retryDate = Date.parse(retryAfter);
+			if (Number.isFinite(retryDate) && retryDate > Date.now()) return retryDate - Date.now();
+		}
+
+		let errorText = '';
+		try {
+			errorText = await response.clone().text();
+		} catch {
+			return UNKNOWN_429_COOLDOWN_MS;
+		}
+		const retryDelay = errorText.match(/"(?:retryDelay|quotaResetDelay)"\s*:\s*"([0-9.]+)s"/i)?.[1];
+		if (retryDelay) return Math.max(1000, Number(retryDelay) * 1000);
+		if (/(per.?day|daily|requests.?per.?day|tokens.?per.?day|\bRPD\b|\bTPD\b)/i.test(errorText)) return INVALID_KEY_COOLDOWN_MS;
+		if (/(per.?minute|requests.?per.?minute|tokens.?per.?minute|\bRPM\b|\bTPM\b)/i.test(errorText)) return MINUTE_COOLDOWN_MS;
+		return UNKNOWN_429_COOLDOWN_MS;
 	}
 
 	private async hasNoUsableCandidate(response: Response): Promise<boolean> {
@@ -858,7 +954,7 @@ export class LoadBalancer extends DurableObject {
 
 		const apiKeys = await this.getRandomApiKeys(MAX_API_KEY_ATTEMPTS);
 		if (apiKeys.length === 0) {
-			return new Response('No API keys configured in the load balancer.', { status: 500 });
+			return this.noAvailableKeysResponse();
 		}
 
 		switch (true) {
