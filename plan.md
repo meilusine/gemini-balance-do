@@ -5,7 +5,7 @@
 - Project name: gemini-balance-do
 - Current phase: Compatibility fix
 - Current task: Gemini 3.6+ trailing model turn compatibility
-- Status: [-] safety and authentication update verified locally; deployment pending
+- Status: [x] safety and authentication update deployed and verified
 - Last updated: 2026-09-04
 
 ## 1. Final Goal
@@ -26,10 +26,10 @@ Out of scope:
 
 ## 2. Current Status
 
-- Phase: security and safety configuration
-- Current task: deploy API/admin authentication and minimum adjustable safety filtering
+- Phase: complete
+- Current task: live verification completed
 - Blocked: no
-- Next task: verify anonymous access is rejected after deployment
+- Next task: user verifies a normal SillyTavern reply with the existing `AUTH_KEY`
 - Known issue: live upstream verification requires the user's deployed secrets and is performed after Cloudflare deployment.
 
 ## 3. Architecture
@@ -74,7 +74,7 @@ SillyTavern request
 - [x] Set all adjustable Gemini safety categories to `OFF`.
 - [x] Protect API routes with `AUTH_KEY`.
 - [x] Protect the management page and `/api/*` routes with `HOME_ACCESS_KEY`.
-- [-] Deploy and verify authentication on the live domain.
+- [x] Deploy and verify authentication on the live domain.
 
 ## 8. Task Backlog
 
@@ -97,6 +97,7 @@ Latest verification:
 - Result: both exited successfully; Worker bundle completed at 126.15 KiB (30.79 KiB gzip).
 - Live verification: an unauthenticated Gemini 3.8 native request ending in `model` returned HTTP 200, proving the repair is active. Final SillyTavern UI verification remains for the user.
 - 2026-09-04 security update: `npx tsc --noEmit`, Wrangler dry-run, and five authentication helper checks passed.
+- Live authentication: the root URL returned the management login page and an unauthenticated `/v1beta/models` request returned HTTP 401.
 
 ## 10. Security and Defensive Design
 
@@ -114,7 +115,7 @@ Latest verification:
 ## 12. Open Questions
 
 - [ ] Confirm the live SillyTavern preset succeeds after Cloudflare redeploys the commit.
-- [-] Verify API and management authentication on the live Worker.
+- [x] Verify API and management authentication on the live Worker.
 
 ## 13. Changelog
 
@@ -139,4 +140,4 @@ Latest verification:
 - Description: apply Gemini `OFF` to all adjustable safety categories, protect API routes with `AUTH_KEY`, and protect the admin UI/API with `HOME_ACCESS_KEY`.
 - Reason: minimize adjustable filtering while preventing public use of the stored Gemini keys.
 - Impact: clients must send `AUTH_KEY`; the management page now requires a password and uses a secure, HTTP-only, same-site cookie.
-- Status: locally verified; live deployment pending.
+- Status: deployed and live verified.
