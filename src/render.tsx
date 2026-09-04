@@ -229,3 +229,25 @@ export const Render = () => {
 		</html>
 	);
 };
+
+export const RenderLogin = (error?: string) => {
+	return (
+		<html>
+			<head>
+				<meta charset="UTF-8" />
+				<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+				<title>Gemini 管理面板登录</title>
+				<script src="https://cdn.tailwindcss.com"></script>
+			</head>
+			<body class="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+				<form method="post" action="/" class="w-full max-w-sm bg-white rounded-lg shadow-md p-6">
+					<h1 class="text-2xl font-bold mb-5">管理面板登录</h1>
+					{error ? <p class="mb-4 text-red-600">{error}</p> : null}
+					<label class="block mb-2 font-medium" for="key">管理密码</label>
+					<input id="key" name="key" type="password" required autocomplete="current-password" class="w-full p-2 border rounded mb-4" />
+					<button type="submit" class="w-full px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">登录</button>
+				</form>
+			</body>
+		</html>
+	);
+};

@@ -29,6 +29,17 @@ const BASE_URL = 'https://generativelanguage.googleapis.com';
 const API_VERSION = 'v1beta';
 const API_CLIENT = 'genai-js/0.21.0';
 
+const SAFETY_CATEGORIES = [
+	'HARM_CATEGORY_HATE_SPEECH',
+	'HARM_CATEGORY_SEXUALLY_EXPLICIT',
+	'HARM_CATEGORY_DANGEROUS_CONTENT',
+	'HARM_CATEGORY_HARASSMENT',
+	'HARM_CATEGORY_CIVIC_INTEGRITY',
+	'HARM_CATEGORY_JAILBREAK',
+];
+
+const minimumSafetySettings = () => SAFETY_CATEGORIES.map((category) => ({ category, threshold: 'OFF' }));
+
 const makeHeaders = (apiKey: string, more?: Record<string, string>) => ({
 	'x-goog-api-client': API_CLIENT,
 	...(apiKey && { 'x-goog-api-key': apiKey }),
@@ -60,6 +71,12 @@ const ensureTrailingUserTurn = (body: any, model: string) => {
 		parts: [{ text: CONTINUE_AFTER_MODEL_PROMPT }],
 	});
 	return body;
+};
+
+const prepareGeminiBody = (body: any, model: string) => {
+	if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
+	body.safetySettings = minimumSafetySettings();
+	return ensureTrailingUserTurn(body, model);
 };
 
 const getGeminiModelFromPath = (pathname: string) => {
@@ -117,7 +134,10 @@ export class LoadBalancer extends DurableObject {
 		}
 
 		// Direct Gemini proxy
-		const targetUrl = `${BASE_URL}${pathname}${search}`;
+		// The client's `key` is the relay AUTH_KEY. Never forward it to Google as a Gemini API key.
+		const upstreamUrl = new URL(`${BASE_URL}${pathname}${search}`);
+		upstreamUrl.searchParams.delete('key');
+		const targetUrl = upstreamUrl.toString();
 
 		try {
 			const headers = new Headers();
@@ -136,11 +156,11 @@ export class LoadBalancer extends DurableObject {
 
 			let requestBody: BodyInit | null = request.body;
 			const directModel = getGeminiModelFromPath(pathname);
-			if (request.method === 'POST' && directModel && requiresTrailingUserTurn(directModel)) {
+			if (request.method === 'POST' && directModel) {
 				const rawBody = await request.text();
 				requestBody = rawBody;
 				try {
-					requestBody = JSON.stringify(ensureTrailingUserTurn(JSON.parse(rawBody), directModel));
+					requestBody = JSON.stringify(prepareGeminiBody(JSON.parse(rawBody), directModel));
 				} catch {
 					// Keep the original body so Gemini can return its normal JSON validation error.
 				}
@@ -362,22 +382,9 @@ export class LoadBalancer extends DurableObject {
 	}
 
 	private async transformRequest(req: any) {
-		const harmCategory = [
-			'HARM_CATEGORY_HATE_SPEECH',
-			'HARM_CATEGORY_SEXUALLY_EXPLICIT',
-			'HARM_CATEGORY_DANGEROUS_CONTENT',
-			'HARM_CATEGORY_HARASSMENT',
-			'HARM_CATEGORY_CIVIC_INTEGRITY',
-		];
-
-		const safetySettings = harmCategory.map((category) => ({
-			category,
-			threshold: 'BLOCK_NONE',
-		}));
-
 		return {
 			...(await this.transformMessages(req.messages)),
-			safetySettings,
+			safetySettings: minimumSafetySettings(),
 			generationConfig: this.transformConfig(req),
 			...this.transformTools(req),
 			cachedContent: undefined as any,
