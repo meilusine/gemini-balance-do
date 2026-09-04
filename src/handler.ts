@@ -78,10 +78,38 @@ const ensureTrailingUserTurn = (body: any, model: string) => {
 	return body;
 };
 
+const isGemini3Model = (model: string) => /^gemini-3(?:[.-]|$)/.test(model);
+
+const normalizeGemini3Body = (body: any, model: string) => {
+	if (!isGemini3Model(model) || !body || typeof body !== 'object' || Array.isArray(body)) return body;
+
+	const config = body.generationConfig;
+	if (!config || typeof config !== 'object' || Array.isArray(config)) return body;
+
+	// Gemini 3.x uses its tuned defaults for sampling and does not support multiple candidates.
+	delete config.candidateCount;
+	delete config.temperature;
+	delete config.topP;
+	delete config.topK;
+
+	const thinkingConfig = config.thinkingConfig;
+	if (thinkingConfig && typeof thinkingConfig === 'object' && !Array.isArray(thinkingConfig)) {
+		// Gemini 3.7/3.8 Flash and Gemini 3.1 Pro reject the "minimal" level.
+		if (
+			thinkingConfig.thinkingLevel === 'minimal' &&
+			(/^gemini-3\.(?:7|8)-flash(?:$|[-:])/.test(model) || /^gemini-3\.1-pro(?:$|[-:])/.test(model))
+		) {
+			thinkingConfig.thinkingLevel = 'low';
+		}
+	}
+
+	return body;
+};
+
 const prepareGeminiBody = (body: any, model: string) => {
 	if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
 	body.safetySettings = minimumSafetySettings();
-	return ensureTrailingUserTurn(body, model);
+	return normalizeGemini3Body(ensureTrailingUserTurn(body, model), model);
 };
 
 const getGeminiModelFromPath = (pathname: string) => {
@@ -297,7 +325,7 @@ export class LoadBalancer extends DurableObject {
 				model = req.model;
 		}
 
-		let body = await this.transformRequest(req);
+		let body = await this.transformRequest(req, model);
 		body = ensureTrailingUserTurn(body, model);
 		const extra = req.extra_body?.google;
 
@@ -312,6 +340,7 @@ export class LoadBalancer extends DurableObject {
 				body.generationConfig.thinkingConfig = extra.thinking_config;
 			}
 		}
+		body = normalizeGemini3Body(body, model);
 
 		switch (true) {
 			case model.endsWith(':search'):
@@ -392,17 +421,17 @@ export class LoadBalancer extends DurableObject {
 		return Array.from({ length: 29 }, randomChar).join('');
 	}
 
-	private async transformRequest(req: any) {
+	private async transformRequest(req: any, model: string) {
 		return {
 			...(await this.transformMessages(req.messages)),
 			safetySettings: minimumSafetySettings(),
-			generationConfig: this.transformConfig(req),
+			generationConfig: this.transformConfig(req, model),
 			...this.transformTools(req),
 			cachedContent: undefined as any,
 		};
 	}
 
-	private transformConfig(req: any) {
+	private transformConfig(req: any, model: string) {
 		const fieldsMap: Record<string, string> = {
 			frequency_penalty: 'frequencyPenalty',
 			max_completion_tokens: 'maxOutputTokens',
@@ -449,7 +478,9 @@ export class LoadBalancer extends DurableObject {
 			}
 		}
 		if (req.reasoning_effort) {
-			cfg.thinkingConfig = { thinkingBudget: thinkingBudgetMap[req.reasoning_effort] };
+			cfg.thinkingConfig = isGemini3Model(model)
+				? { thinkingLevel: req.reasoning_effort }
+				: { thinkingBudget: thinkingBudgetMap[req.reasoning_effort] };
 		}
 
 		return cfg;
@@ -620,9 +651,10 @@ export class LoadBalancer extends DurableObject {
 
 		if (candidates) {
 			for (const cand of candidates) {
-				const { index, content, finishReason } = cand;
-				const { parts } = content;
-				const text = parts.map((p: any) => p.text).join('');
+				const { content, finishReason } = cand;
+				const index = cand.index ?? 0;
+				const parts = content?.parts ?? [];
+				const text = parts.map((p: any) => (typeof p.text === 'string' ? p.text : '')).join('');
 
 				if (this.last[index] === undefined) {
 					this.last[index] = '';

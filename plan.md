@@ -162,3 +162,13 @@ Latest verification:
 - Rules: explicit retry delay is honored; minute quota uses 90 seconds; daily quota and 401/403 use 24 hours; unknown 429 uses 5 minutes; 503 is retried without cooling the key.
 - Security: cooldown logs never include API key values.
 - Status: implementation in verification.
+
+### 2026-09-04 (Gemini 3.x request and stream compatibility)
+
+- Type: compatibility fix
+- Description: normalize confirmed Gemini 3.x request differences in both native and OpenAI-compatible paths by removing unsupported or deprecated sampling fields and using `thinkingLevel` for OpenAI `reasoning_effort`.
+- Model handling: preserve supported levels for Gemini 3.1/3.5/3.6; convert unsupported `minimal` to `low` for Gemini 3.7/3.8 Flash and Gemini 3.1 Pro.
+- Streaming: tolerate final Gemini SSE candidates that contain `finishReason` without a `content` object.
+- Scope: Gemini 2.x behavior, authentication, safety settings, key selection, retry, and cooldown logic are unchanged.
+- Verification: `npx tsc --noEmit` and `npx wrangler deploy --dry-run` passed.
+- Status: locally verified; deployment pending.
