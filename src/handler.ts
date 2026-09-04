@@ -80,17 +80,27 @@ const ensureTrailingUserTurn = (body: any, model: string) => {
 
 const isGemini3Model = (model: string) => /^gemini-3(?:[.-]|$)/.test(model);
 
+const requiresGemini3SamplingDefaults = (model: string) => {
+	const match = model.match(/^gemini-3\.(\d+)(?:[.-]|$)/);
+	return Boolean(match && Number(match[1]) >= 6);
+};
+
 const normalizeGemini3Body = (body: any, model: string) => {
 	if (!isGemini3Model(model) || !body || typeof body !== 'object' || Array.isArray(body)) return body;
 
 	const config = body.generationConfig;
 	if (!config || typeof config !== 'object' || Array.isArray(config)) return body;
 
-	// Gemini 3.x uses its tuned defaults for sampling and does not support multiple candidates.
+	// Multiple candidates are unsupported across Gemini 3.x.
 	delete config.candidateCount;
-	delete config.temperature;
-	delete config.topP;
-	delete config.topK;
+
+	// Gemini 3.6+ requires the model-tuned sampling defaults. Gemini 3.5 merely
+	// recommends them, so retain explicit roleplay settings for compatibility.
+	if (requiresGemini3SamplingDefaults(model)) {
+		delete config.temperature;
+		delete config.topP;
+		delete config.topK;
+	}
 
 	const thinkingConfig = config.thinkingConfig;
 	if (thinkingConfig && typeof thinkingConfig === 'object' && !Array.isArray(thinkingConfig)) {
